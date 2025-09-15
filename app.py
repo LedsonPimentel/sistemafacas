@@ -28,29 +28,39 @@ st.set_page_config(page_title="Biblioteca de Facas", layout="wide")
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
-    # Adicionando uma nova coluna para o arquivo CDR
+    
+    # Cria a tabela se ela não existir
     c.execute("""
     CREATE TABLE IF NOT EXISTS facas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         description TEXT,
-        pdf_filename TEXT NOT NULL,
-        pdf_original_name TEXT,
-        thumb TEXT,
-        cdr_filename TEXT,
-        cdr_original_name TEXT,
         uploaded_at TEXT
     )
     """)
-    # Usando ALTER TABLE para adicionar colunas se elas não existirem
+    
+    # Adiciona as novas colunas se elas não existirem
+    try:
+        c.execute("ALTER TABLE facas ADD COLUMN pdf_filename TEXT")
+    except sqlite3.OperationalError:
+        pass 
+    try:
+        c.execute("ALTER TABLE facas ADD COLUMN pdf_original_name TEXT")
+    except sqlite3.OperationalError:
+        pass 
+    try:
+        c.execute("ALTER TABLE facas ADD COLUMN thumb TEXT")
+    except sqlite3.OperationalError:
+        pass
     try:
         c.execute("ALTER TABLE facas ADD COLUMN cdr_filename TEXT")
     except sqlite3.OperationalError:
-        pass # Coluna já existe
+        pass
     try:
         c.execute("ALTER TABLE facas ADD COLUMN cdr_original_name TEXT")
     except sqlite3.OperationalError:
-        pass # Coluna já existe
+        pass
+        
     conn.commit()
     return conn
 
@@ -69,16 +79,22 @@ def add_faca_db(name, description, pdf_info, cdr_info, thumb_path):
 
 def get_facas_db(search=""):
     cur = conn.cursor()
+    # Verifica se as colunas existem antes de fazer a busca
+    cur.execute("PRAGMA table_info(facas)")
+    cols = [col[1] for col in cur.fetchall()]
+    
+    if "pdf_filename" not in cols or "cdr_filename" not in cols:
+        st.error("O banco de dados não está atualizado. Por favor, reinicie o app.")
+        return []
+
     if search:
         q = f"%{search}%"
         cur.execute("SELECT * FROM facas WHERE name LIKE ? OR description LIKE ? ORDER BY uploaded_at DESC", (q, q))
     else:
         cur.execute("SELECT * FROM facas ORDER BY uploaded_at DESC")
     rows = cur.fetchall()
-    keys = [
-        "id", "name", "description", "pdf_filename", "pdf_original_name", 
-        "thumb", "cdr_filename", "cdr_original_name", "uploaded_at"
-    ]
+    
+    keys = ["id", "name", "description", "pdf_filename", "pdf_original_name", "thumb", "cdr_filename", "cdr_original_name", "uploaded_at"]
     return [dict(zip(keys, r)) for r in rows]
 
 def update_faca_db(faca_id, name, description, pdf_info=None, cdr_info=None, thumb_path=None):
@@ -233,17 +249,18 @@ if menu == "Listar Facas":
                             )
 
                 # Preview do PDF
-                file_path = UPLOAD_DIR / f["pdf_filename"]
-                if file_path.exists():
-                    st.write("Preview do PDF (primeiras páginas):")
-                    imgs = get_pdf_preview_images(file_path, max_pages=3)
-                    if imgs:
-                        for imgb in imgs:
-                            st.image(imgb)
+                if "pdf_filename" in f and f["pdf_filename"]:
+                    file_path = UPLOAD_DIR / f["pdf_filename"]
+                    if file_path.exists():
+                        st.write("Preview do PDF (primeiras páginas):")
+                        imgs = get_pdf_preview_images(file_path, max_pages=3)
+                        if imgs:
+                            for imgb in imgs:
+                                st.image(imgb)
+                        else:
+                            st.info("Não foi possível gerar preview do PDF.")
                     else:
-                        st.info("Não foi possível gerar preview do PDF.")
-                else:
-                    st.info("Arquivo PDF não encontrado. Recomendo exportar para PDF.")
+                        st.info("Arquivo PDF não encontrado. Recomendo exportar para PDF.")
                 
                 if st.button("✏️ Editar (nome/descrição)", key=f"edit_{f['id']}"):
                     with st.form(f"form_edit_{f['id']}"):
@@ -254,7 +271,7 @@ if menu == "Listar Facas":
                         submitted = st.form_submit_button("Salvar alterações")
                         
                         if submitted:
-                            pdf_info, cdr_info, thumb = None, None, f["thumb"]
+                            pdf_info, cdr_info, thumb = None, None, f.get("thumb")
                             
                             if replace_pdf:
                                 stored, orig = save_upload(replace_pdf)
