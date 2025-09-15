@@ -79,19 +79,7 @@ def add_faca_db(name, description, pdf_info, cdr_info, thumb_path):
 
 def get_facas_db(search=""):
     cur = conn.cursor()
-    # Verifica se as colunas existem antes de fazer a busca
-    cur.execute("PRAGMA table_info(facas)")
-    cols = [col[1] for col in cur.fetchall()]
-    
-    if "pdf_filename" not in cols or "cdr_filename" not in cols:
-        st.error("O banco de dados não está atualizado. Por favor, reinicie o app.")
-        return []
-
-    if search:
-        q = f"%{search}%"
-        cur.execute("SELECT * FROM facas WHERE name LIKE ? OR description LIKE ? ORDER BY uploaded_at DESC", (q, q))
-    else:
-        cur.execute("SELECT * FROM facas ORDER BY uploaded_at DESC")
+    cur.execute("SELECT * FROM facas ORDER BY uploaded_at DESC")
     rows = cur.fetchall()
     
     keys = ["id", "name", "description", "pdf_filename", "pdf_original_name", "thumb", "cdr_filename", "cdr_original_name", "uploaded_at"]
@@ -137,7 +125,7 @@ def delete_faca_db(faca_id):
 # File helpers
 # -------------------------
 def save_upload(uploaded_file):
-    """Save uploaded file to uploads/ with unique name. Returns (stored_filename, original_name, filetype)."""
+    """Save uploaded file to uploads/ with unique name. Returns (stored_filename, original_name)."""
     ext = Path(uploaded_file.name).suffix.lower()
     uid = uuid.uuid4().hex
     stored_name = f"{uid}{ext}"
@@ -209,7 +197,7 @@ if menu == "Listar Facas":
     for f in facas:
         cols = st.columns([1,4,1])
         with cols[0]:
-            if f["thumb"]:
+            if f.get("thumb"):
                 thumb_path = THUMB_DIR / f["thumb"]
                 if thumb_path.exists():
                     st.image(str(thumb_path), use_container_width=True)
@@ -219,9 +207,9 @@ if menu == "Listar Facas":
                 st.write("PDF")
 
         with cols[1]:
-            st.subheader(f["name"])
-            st.markdown(f"**Descrição:** {f['description'] or '_sem descrição_'}")
-            st.caption(f"Enviado em {f['uploaded_at']}")
+            st.subheader(f.get("name") or "Sem Nome")
+            st.markdown(f"**Descrição:** {f.get('description') or '_sem descrição_'}")
+            st.caption(f"Enviado em {f.get('uploaded_at')}")
 
             exp = st.expander("Visualizar / Ações")
             with exp:
@@ -229,27 +217,27 @@ if menu == "Listar Facas":
                 download_cols = st.columns(2)
                 
                 with download_cols[0]:
-                    if f["pdf_filename"] and (UPLOAD_DIR / f["pdf_filename"]).exists():
+                    if f.get("pdf_filename") and (UPLOAD_DIR / f["pdf_filename"]).exists():
                         with open(UPLOAD_DIR / f["pdf_filename"], "rb") as fh:
                             st.download_button(
                                 "⬇️ Baixar PDF", 
                                 data=fh, 
-                                file_name=f["pdf_original_name"] or f["pdf_filename"], 
-                                key=f"{f['pdf_filename']}_pdf"
+                                file_name=f.get("pdf_original_name") or f["pdf_filename"], 
+                                key=f"{f.get('pdf_filename')}_pdf"
                             )
                 
                 with download_cols[1]:
-                    if f["cdr_filename"] and (UPLOAD_DIR / f["cdr_filename"]).exists():
+                    if f.get("cdr_filename") and (UPLOAD_DIR / f["cdr_filename"]).exists():
                         with open(UPLOAD_DIR / f["cdr_filename"], "rb") as fh:
                             st.download_button(
                                 "⬇️ Baixar CDR", 
                                 data=fh, 
-                                file_name=f["cdr_original_name"] or f["cdr_filename"], 
-                                key=f"{f['cdr_filename']}_cdr"
+                                file_name=f.get("cdr_original_name") or f["cdr_filename"], 
+                                key=f"{f.get('cdr_filename')}_cdr"
                             )
 
                 # Preview do PDF
-                if "pdf_filename" in f and f["pdf_filename"]:
+                if "pdf_filename" in f and f.get("pdf_filename"):
                     file_path = UPLOAD_DIR / f["pdf_filename"]
                     if file_path.exists():
                         st.write("Preview do PDF (primeiras páginas):")
@@ -264,8 +252,8 @@ if menu == "Listar Facas":
                 
                 if st.button("✏️ Editar (nome/descrição)", key=f"edit_{f['id']}"):
                     with st.form(f"form_edit_{f['id']}"):
-                        new_name = st.text_input("Novo Nome", value=f["name"])
-                        new_desc = st.text_area("Nova Descrição", value=f["description"])
+                        new_name = st.text_input("Novo Nome", value=f.get("name"))
+                        new_desc = st.text_area("Nova Descrição", value=f.get("description"))
                         replace_pdf = st.file_uploader("Substituir arquivo PDF (opcional)", type=["pdf"])
                         replace_cdr = st.file_uploader("Substituir arquivo CDR (opcional)", type=None)
                         submitted = st.form_submit_button("Salvar alterações")
@@ -282,7 +270,7 @@ if menu == "Listar Facas":
                                     if old_p.exists(): old_p.unlink()
                                 except: pass
                                 try:
-                                    old_t = THUMB_DIR / f["thumb"] if f["thumb"] else None
+                                    old_t = THUMB_DIR / f["thumb"] if f.get("thumb") else None
                                     if old_t and old_t.exists(): old_t.unlink()
                                 except: pass
                             
@@ -308,7 +296,7 @@ if menu == "Listar Facas":
     if st.session_state.delete_id is not None:
         st.error(f"⚠️ **Confirma a exclusão do registro?**")
         st.markdown(f"**ID:** {st.session_state.delete_id}")
-        st.markdown(f"**Nome:** {next((item['name'] for item in facas if item['id'] == st.session_state.delete_id), 'N/A')}")
+        st.markdown(f"**Nome:** {next((item.get('name') for item in facas if item['id'] == st.session_state.delete_id), 'N/A')}")
         
         col_confirm, col_cancel = st.columns(2)
         with col_confirm:
