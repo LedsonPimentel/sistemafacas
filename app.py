@@ -1,61 +1,47 @@
-# app.py
 import streamlit as st
 import sqlite3
-from pathlib import Path
-import uuid
+import os
 import datetime
 from PIL import Image
-import fitz # PyMuPDF
+import fitz  # PyMuPDF
 
-# -------------------------
-# Config
-# -------------------------
-BASE_DIR = Path(__file__).parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-THUMB_DIR = BASE_DIR / "thumbs"
-DB_PATH = BASE_DIR / "facas.db"
+# ---------------- CONFIGURAÇÕES ----------------
+DB_PATH = "facas.db"
+UPLOAD_DIR = "uploads"
+THUMB_DIR = "thumbnails"
 
-UPLOAD_DIR.mkdir(exist_ok=True)
-THUMB_DIR.mkdir(exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(THUMB_DIR, exist_ok=True)
 
-st.set_page_config(page_title="Biblioteca de Facas", layout="wide")
+# ---------------- BANCO DE DADOS ----------------
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 
-# -------------------------
-# DB helpers
-# -------------------------
 def init_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    c = conn.cursor()
-    
-    # Cria a tabela se não existir
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS facas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        description TEXT,
-        uploaded_at TEXT
-    )
-    """)
-    
-    # Adiciona colunas extras, se não existirem
-    for col in [
-        ("pdf_filename", "TEXT"),
-        ("pdf_original_name", "TEXT"),
-        ("thumb", "TEXT"),
-        ("cdr_filename", "TEXT"),
-        ("cdr_original_name", "TEXT")
-    ]:
-        try:
-            c.execute(f"ALTER TABLE facas ADD COLUMN {col[0]} {col[1]}")
-        except sqlite3.OperationalError:
-            pass
-        
-    conn.commit()
-    return conn
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS facas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                pdf_filename TEXT,
+                pdf_original_name TEXT,
+                thumb TEXT,
+                cdr_filename TEXT,
+                cdr_original_name TEXT,
+                uploaded_at TEXT
+            )
+        """)
+init_db()
 
-conn = init_db()
+def faca_exists(name, pdf_filename):
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM facas WHERE name = ? OR pdf_filename = ?", (name, pdf_filename))
+    return cur.fetchone() is not None
 
 def add_faca_db(name, description, pdf_info, cdr_info, thumb_path):
+    if faca_exists(name, pdf_info[0] if pdf_info else None):
+        raise ValueError("❌ Já existe uma faca com esse nome ou PDF!")
+
     uploaded_at = datetime.datetime.now().isoformat(sep=" ", timespec="seconds")
     pdf_filename, pdf_original_name = pdf_info if pdf_info else (None, None)
     cdr_filename, cdr_original_name = cdr_info if cdr_info else (None, None)
@@ -80,257 +66,82 @@ def get_facas_db(search=""):
     keys = ["id", "name", "description", "pdf_filename", "pdf_original_name", "thumb", "cdr_filename", "cdr_original_name", "uploaded_at"]
     return [dict(zip(keys, r)) for r in rows]
 
-def update_faca_db(faca_id, name, description, pdf_info=None, cdr_info=None, thumb_path=None):
-    set_clauses = ["name=?", "description=?"]
-    params = [name, description]
-
-    if pdf_info:
-        set_clauses.extend(["pdf_filename=?", "pdf_original_name=?", "thumb=?"])
-        params.extend([pdf_info[0], pdf_info[1], thumb_path])
-    
-    if cdr_info:
-        set_clauses.extend(["cdr_filename=?", "cdr_original_name=?"])
-        params.extend([cdr_info[0], cdr_info[1]])
-
-    params.append(faca_id)
-    
-    with conn:
-        conn.execute(
-            f"UPDATE facas SET {', '.join(set_clauses)} WHERE id=?",
-            tuple(params)
-        )
-
-def delete_faca_db(faca_id):
-    cur = conn.cursor()
-    cur.execute("SELECT pdf_filename, thumb, cdr_filename FROM facas WHERE id=?", (faca_id,))
-    row = cur.fetchone()
-    if row:
-        pdf_filename, thumb, cdr_filename = row
-        for f in [pdf_filename, thumb, cdr_filename]:
-            if f:
-                try:
-                    # procura em uploads e thumbs
-                    for folder in [UPLOAD_DIR, THUMB_DIR]:
-                        p = folder / f
-                        if p.exists(): 
-                            p.unlink()
-                except Exception:
-                    pass
-    with conn:
-        conn.execute("DELETE FROM facas WHERE id=?", (faca_id,))
-
-# -------------------------
-# File helpers
-# -------------------------
-def save_upload(uploaded_file):
-    """Save uploaded file to uploads/ with unique name. Returns (stored_filename, original_name)."""
-    ext = Path(uploaded_file.name).suffix.lower()
-    uid = uuid.uuid4().hex
-    stored_name = f"{uid}{ext}"
-    saved_path = UPLOAD_DIR / stored_name
-    with open(saved_path, "wb") as f:
+# ---------------- UTILIDADES ----------------
+def save_file(uploaded_file, folder):
+    if uploaded_file is None:
+        return None, None
+    filename = f"{datetime.datetime.now().timestamp()}_{uploaded_file.name}"
+    filepath = os.path.join(folder, filename)
+    with open(filepath, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    return stored_name, uploaded_file.name
+    return filename, uploaded_file.name
 
-def generate_pdf_thumbnail(file_path, page_number=0, zoom=2.0):
-    try:
-        doc = fitz.open(str(file_path))
-        if doc.page_count == 0:
-            return None
-        page = doc.load_page(page_number)
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        thumb_bytes = pix.tobytes("png")
-        thumb_name = f"{file_path.stem}_p{page_number}.png"
-        thumb_path = THUMB_DIR / thumb_name
-        with open(thumb_path, "wb") as f:
-            f.write(thumb_bytes)
-        return thumb_name
-    except Exception:
-        return None
+def generate_thumbnail(pdf_path, thumb_path):
+    doc = fitz.open(pdf_path)
+    page = doc[0]
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    img.save(thumb_path, "PNG")
+    return thumb_path
 
-def get_pdf_preview_images(file_path, max_pages=3, zoom=1.5):
-    images = []
-    try:
-        doc = fitz.open(str(file_path))
-        pages = min(max_pages, doc.page_count)
-        for i in range(pages):
-            page = doc.load_page(i)
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            png_bytes = pix.tobytes("png")
-            images.append(png_bytes)
-    except Exception:
-        pass
-    return images
+# ---------------- INTERFACE ----------------
+st.set_page_config(page_title="Sistema de Facas", layout="wide")
+st.title("🔪 Sistema de Facas")
 
-# -------------------------
-# UI
-# -------------------------
-st.title("📂 Biblioteca de Facas de Corte & Vinco")
+menu = ["Adicionar Faca", "Listar Facas"]
+choice = st.sidebar.radio("Menu", menu)
 
-# Gerenciamento de Exclusão com Session State
-if 'delete_id' not in st.session_state:
-    st.session_state.delete_id = None
-if 'confirm_delete' not in st.session_state:
-    st.session_state.confirm_delete = False
+if choice == "Adicionar Faca":
+    st.subheader("➕ Adicionar Nova Faca")
 
-if st.session_state.confirm_delete and st.session_state.delete_id is not None:
-    delete_faca_db(st.session_state.delete_id)
-    st.success("✅ Registro excluído com sucesso!")
-    st.session_state.delete_id = None
-    st.session_state.confirm_delete = False
-    st.rerun()
+    with st.form("add_faca_form", clear_on_submit=True):
+        name = st.text_input("Nome da faca")
+        description = st.text_area("Descrição")
+        pdf_file = st.file_uploader("Upload do PDF", type=["pdf"])
+        cdr_file = st.file_uploader("Upload do Corel (CDR)", type=["cdr"])
+        submit = st.form_submit_button("Salvar Faca")
 
-menu = st.sidebar.selectbox("Menu", ["Listar Facas", "Adicionar Faca", "Sobre"])
-
-if menu == "Listar Facas":
-    st.header("Listagem")
-    search = st.text_input("🔍 Buscar por nome ou descrição")
-    facas = get_facas_db(search)
-    st.write(f"Encontradas: {len(facas)}")
-    for f in facas:
-        cols = st.columns([1,4,1])
-        with cols[0]:
-            if f.get("thumb"):
-                thumb_path = THUMB_DIR / f["thumb"]
-                if thumb_path.exists():
-                    st.image(str(thumb_path), use_container_width=True)
-                else:
-                    st.write("PDF")
-            else:
-                st.write("PDF")
-
-        with cols[1]:
-            st.subheader(f.get("name") or "Sem Nome")
-            st.markdown(f"**Descrição:** {f.get('description') or '_sem descrição_'}")
-            st.caption(f"Enviado em {f.get('uploaded_at')}")
-
-            exp = st.expander("Visualizar / Ações")
-            with exp:
-                download_cols = st.columns(2)
-                
-                with download_cols[0]:
-                    if f.get("pdf_filename") and (UPLOAD_DIR / f["pdf_filename"]).exists():
-                        with open(UPLOAD_DIR / f["pdf_filename"], "rb") as fh:
-                            st.download_button(
-                                "⬇️ Baixar PDF", 
-                                data=fh, 
-                                file_name=f.get("pdf_original_name") or f["pdf_filename"], 
-                                key=f"{f['id']}_pdf"
-                            )
-                
-                with download_cols[1]:
-                    if f.get("cdr_filename") and (UPLOAD_DIR / f["cdr_filename"]).exists():
-                        with open(UPLOAD_DIR / f["cdr_filename"], "rb") as fh:
-                            st.download_button(
-                                "⬇️ Baixar CDR", 
-                                data=fh, 
-                                file_name=f.get("cdr_original_name") or f["cdr_filename"], 
-                                key=f"{f['id']}_cdr"
-                            )
-
-                if "pdf_filename" in f and f.get("pdf_filename"):
-                    file_path = UPLOAD_DIR / f["pdf_filename"]
-                    if file_path.exists():
-                        st.write("Preview do PDF (primeiras páginas):")
-                        imgs = get_pdf_preview_images(file_path, max_pages=3)
-                        if imgs:
-                            for imgb in imgs:
-                                st.image(imgb)
-                        else:
-                            st.info("Não foi possível gerar preview do PDF.")
-                    else:
-                        st.info("Arquivo PDF não encontrado.")
-
-                if st.button("✏️ Editar (nome/descrição)", key=f"edit_{f['id']}"):
-                    with st.form(f"form_edit_{f['id']}"):
-                        new_name = st.text_input("Novo Nome", value=f.get("name"))
-                        new_desc = st.text_area("Nova Descrição", value=f.get("description"))
-                        replace_pdf = st.file_uploader("Substituir arquivo PDF (opcional)", type=["pdf"])
-                        replace_cdr = st.file_uploader("Substituir arquivo CDR (opcional)", type=["cdr","ai","svg","eps"])
-                        submitted = st.form_submit_button("Salvar alterações")
-                        
-                        if submitted:
-                            pdf_info, cdr_info, thumb = None, None, f.get("thumb")
-                            
-                            if replace_pdf:
-                                stored, orig = save_upload(replace_pdf)
-                                pdf_info = (stored, orig)
-                                thumb = generate_pdf_thumbnail(UPLOAD_DIR / stored)
-                                try:
-                                    old_p = UPLOAD_DIR / f["pdf_filename"]
-                                    if old_p.exists(): old_p.unlink()
-                                except: pass
-                                try:
-                                    old_t = THUMB_DIR / f["thumb"] if f.get("thumb") else None
-                                    if old_t and old_t.exists(): old_t.unlink()
-                                except: pass
-                            
-                            if replace_cdr:
-                                stored, orig = save_upload(replace_cdr)
-                                cdr_info = (stored, orig)
-                                try:
-                                    old_c = UPLOAD_DIR / f["cdr_filename"]
-                                    if old_c.exists(): old_c.unlink()
-                                except: pass
-
-                            update_faca_db(f["id"], new_name, new_desc, pdf_info, cdr_info, thumb)
-                            st.success("✅ Atualizado!")
-                            st.rerun()
-
-        with cols[2]:
-            if st.button("🗑️ Excluir", key=f"del_{f['id']}"):
-                st.session_state.delete_id = f['id']
-                st.session_state.confirm_delete = False
-                st.rerun()
-
-    if st.session_state.delete_id is not None:
-        st.error(f"⚠️ **Confirma a exclusão do registro?**")
-        st.markdown(f"**ID:** {st.session_state.delete_id}")
-        st.markdown(f"**Nome:** {next((item.get('name') for item in facas if item['id'] == st.session_state.delete_id), 'N/A')}")
-        
-        col_confirm, col_cancel = st.columns(2)
-        with col_confirm:
-            if st.button("Sim, quero excluir", key="confirm_yes"):
-                st.session_state.confirm_delete = True
-                st.rerun()
-        with col_cancel:
-            if st.button("Não, cancelar", key="confirm_no"):
-                st.session_state.delete_id = None
-                st.session_state.confirm_delete = False
-                st.rerun()
-
-elif menu == "Adicionar Faca":
-    st.header("Adicionar nova faca")
-    with st.form("form_add"):
-        name = st.text_input("Nome da faca", help="Ex: 'Faca Cartão 295 - canto arredondado'")
-        description = st.text_area("Descrição (opcional)")
-        pdf_file = st.file_uploader("Arquivo PDF", type=["pdf"], help="Obrigatório para gerar o preview.")
-        cdr_file = st.file_uploader("Arquivo CDR (ou similar)", type=["cdr","ai","svg","eps"], help="Opcional.")
-        submitted = st.form_submit_button("Salvar")
-        if submitted:
+        if submit:
             if not name:
-                st.error("É necessário informar um nome.")
+                st.error("⚠️ O nome da faca é obrigatório!")
             elif not pdf_file:
-                st.error("É necessário enviar o arquivo PDF.")
+                st.error("⚠️ É obrigatório enviar um arquivo PDF!")
             else:
-                pdf_info = save_upload(pdf_file)
-                thumb = generate_pdf_thumbnail(UPLOAD_DIR / pdf_info[0])
-                
-                cdr_info = None
-                if cdr_file:
-                    cdr_info = save_upload(cdr_file)
-                    
-                add_faca_db(name, description, pdf_info, cdr_info, thumb)
-                st.success("✅ Faca adicionada!")
-                st.rerun()
+                # Salvar arquivos
+                pdf_filename, pdf_original_name = save_file(pdf_file, UPLOAD_DIR)
+                cdr_filename, cdr_original_name = save_file(cdr_file, UPLOAD_DIR)
 
-elif menu == "Sobre":
-    st.header("Sobre este app")
-    st.markdown("""
-    - App simples para gerenciar suas facas de corte/vinco.
-    - Upload salva arquivos em ./uploads e metadados em SQLite.
-    - Preview automático para **PDF** (PyMuPDF).
-    - Para arquivos Corel (.cdr) e outros vetoriais, recomendo exportar para PDF/PNG antes de subir.
-    """)
+                pdf_info = (pdf_filename, pdf_original_name) if pdf_filename else None
+                cdr_info = (cdr_filename, cdr_original_name) if cdr_filename else None
+
+                # Criar thumbnail
+                thumb_filename = f"{pdf_filename}.png"
+                thumb_path = os.path.join(THUMB_DIR, thumb_filename)
+                generate_thumbnail(os.path.join(UPLOAD_DIR, pdf_filename), thumb_path)
+
+                try:
+                    add_faca_db(name, description, pdf_info, cdr_info, thumb_path)
+                    st.success("✅ Faca salva com sucesso!")
+                except ValueError as e:
+                    st.error(str(e))
+
+elif choice == "Listar Facas":
+    st.subheader("📂 Lista de Facas")
+
+    search = st.text_input("🔍 Buscar faca")
+    facas = get_facas_db(search)
+
+    if facas:
+        cols = st.columns(3)
+        for i, faca in enumerate(facas):
+            with cols[i % 3]:
+                st.image(faca["thumb"], width=200)
+                st.markdown(f"**{faca['name']}**")
+                st.caption(faca["description"])
+                if faca["pdf_filename"]:
+                    st.download_button("📥 PDF", os.path.join(UPLOAD_DIR, faca["pdf_filename"]), file_name=faca["pdf_original_name"])
+                if faca["cdr_filename"]:
+                    st.download_button("📥 CDR", os.path.join(UPLOAD_DIR, faca["cdr_filename"]), file_name=faca["cdr_original_name"])
+                st.write(f"🕒 {faca['uploaded_at']}")
+    else:
+        st.info("Nenhuma faca encontrada.")
