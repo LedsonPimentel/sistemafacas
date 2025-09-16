@@ -15,7 +15,7 @@ import datetime
 
 from PIL import Image
 
-import fitz  # PyMuPDF
+import fitz # PyMuPDF
 
 
 
